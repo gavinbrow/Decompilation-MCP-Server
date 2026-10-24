@@ -16,6 +16,7 @@ import uuid
 import importlib.util
 from collections import defaultdict
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
@@ -24,13 +25,15 @@ from starlette.responses import JSONResponse
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('fnv_mcp_live_bridge',ROOT/'scripts/mcp-live-bridge.py')
 live=importlib.util.module_from_spec(spec);spec.loader.exec_module(live)
-TARGETS={} # No private historical assignments are distributed.
+TARGETS={} # Private historical assignments are not distributed.
 
 LOCK=threading.Lock()
 PREP_LOCK=threading.Lock()
 CHECK_SLOTS=threading.BoundedSemaphore(max(1,min(8,(os.cpu_count() or 4)//2)))
 TARGET_LOCKS=defaultdict(threading.Lock)
 ASYNC_TOOL_GATES=WeakKeyDictionary()
+CONTROL_POOL=ThreadPoolExecutor(max_workers=4,thread_name_prefix='mcp-control')
+READ_POOL=ThreadPoolExecutor(max_workers=8,thread_name_prefix='mcp-context')
 @contextmanager
 def checking(target_id):
     with LOCK:gate=TARGET_LOCKS[target_id]
@@ -46,7 +49,7 @@ async def healthz(request):
     """Cheap liveness, independent of compiler slots and upstream REST calls."""
     path=live.BASE/'coordinator.json'
     try:
-        coordinator=await asyncio.to_thread(live.read,path)
+        coordinator=await asyncio.get_running_loop().run_in_executor(CONTROL_POOL,live.read,path)
         age=max(0,time.time()-path.stat().st_mtime)
         healthy=age<120 and coordinator.get('state') in ('running','draining')
     except (OSError,ValueError):coordinator={};age=None;healthy=False
@@ -73,7 +76,9 @@ def background_tool(**options):
                     except asyncio.CancelledError:
                         await task # retain capacity until the actual worker exits
                         raise
-            return await asyncio.to_thread(fn,*args,**kwargs)
+            from functools import partial
+            pool=CONTROL_POOL if fn.__name__ in ('get_work_status','request_function','update_function_request','submit_function','give_up_function') else READ_POOL
+            return await asyncio.get_running_loop().run_in_executor(pool,partial(fn,*args,**kwargs))
         mcp.tool(**options)(handler)
         return fn
     return register
@@ -111,8 +116,15 @@ def save_source(name,source,model,agent_id=''):
 def list_targets()->dict:
     """List current assignments; no historical targets are bundled."""
     targets=dict(TARGETS)
-    for path in (live.BASE/'targets').glob('*.json'):
-        data=live.read(path)
+    catalog=live.BASE/'active-targets.json'
+    # The writer publishes a bounded active catalog. Never scan historical
+    # target files: concurrent discovery previously saturated disk and workers.
+    identities=live.read(catalog).get('targets',[]) if catalog.exists() else []
+    for target_id in identities[:1000]:
+        if not re.fullmatch(r'(?:argon|web)_clm_[0-9a-f]+',target_id):continue
+        path=live.BASE/'targets'/(target_id+'.json')
+        try:data=live.read(path)
+        except (OSError,ValueError):continue
         if data['state'] in ('preparing','working','needs_reconciliation'):targets[data['target_id']]=data
     health=live.read(live.BASE/'coordinator.json') if (live.BASE/'coordinator.json').exists() else {}
     return dict(targets=targets,max_live_claims=health.get('max_live_claims'),max_claims_per_agent=1,

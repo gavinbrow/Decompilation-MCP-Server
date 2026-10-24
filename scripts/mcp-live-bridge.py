@@ -1026,6 +1026,7 @@ class Bridge:
   active_count=len(capacity_claim_ids(rows,status))
   save(self.base/'worker-groups.json',dict(utc=now().isoformat(),groups=dashboard_groups(rows),account={k:status.get(k) for k in ('verified_matches','awaiting_verification','strikes_last_7_days','submissions_today')}))
   queue_counts=queued_claim_counts()
+  save(self.base/'active-targets.json',dict(utc=now().isoformat(),targets=[target_name(r) for r in owned if not r.get('done')]))
   save(self.base/'coordinator.json',dict(utc=now().isoformat(),state='draining' if stopping else 'running',uncertain_mutation=self.uncertain,service_pause=service_pause,
       max_live_claims=status['limits']['claims'],active_web_agents=sum(not r.get('done') for r in owned),
       available_claim_slots=max(0,status['limits']['claims']-active_count),pending_web_claims=queue_counts['web']>0,pending_mailbox_claims=self.pending_claims,
