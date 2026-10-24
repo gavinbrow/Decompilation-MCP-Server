@@ -1,0 +1,22 @@
+# Credentials, licensed inputs, upstream downloads and runtime state are PRIVATE.
+/local/
+/work/
+/tools/
+/contributions/
+/.venv/
+/.env
+/.env.*
+__pycache__/
+*.pyc
+*.dpapi
+*.exe
+*.dll
+*.obj
+*.pdb
+*.asm
+*.disasm
+*.iso
+*.cab
+*.msi
+*.tar.gz
+*.log
